@@ -1,0 +1,10 @@
+spring:
+    datasource:
+        url: ${SPRING_MYSQL_URL:jdbc:mysql://172.17.0.2:3306/db_example}
+        username: ${SPRING_MYSQL_USER:user}
+        password: ${SPRING_MYSQL_PASSWORD:password}
+    jpa:
+        hibernate:
+            ddl-auto: update
+server:
+    port: ${SPRING_PORT:8080}

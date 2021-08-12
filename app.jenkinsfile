@@ -1,0 +1,139 @@
+pipeline {
+	agent any
+     environment {
+          git_repo = "https://github.com/kaminss/spring-mysql-example.git"
+          branch = "master"
+          registry_img = "asia.gcr.io/q-chang-poc/simple-app"
+          config_path = "k8s/deployment.yaml"
+          issuejira = "PP-1"
+     }
+	stages {
+          stage('checkout data') {              
+               steps{
+                    script {
+                       commit_repo = git([url: "${git_repo}", branch: "${branch}"])
+                       commit_id = commit_repo.GIT_COMMIT
+                       commit_email = sh(
+                                   script: "git --no-pager show -s --format='%ae' ${commit_id}",
+                                    returnStdout: true
+                              ).trim()
+                       commit_message = "branch : ${branch}\n" +"author : ${commit_email}\ndetail : " + sh(script: "git log --format=format:%s -1 ${commit_id}", returnStdout: true).trim() + "\n\n"
+                      
+                    }
+               }
+          }
+
+
+          stage('SonarScan') {
+                    environment {
+                    SCANNER_HOME = tool 'sonarqube-scanner'
+                    PROJECT_NAME = "simple-app"
+                    }
+
+                    steps {
+                    withSonarQubeEnv('SonarServer') {
+                         sh '''$SCANNER_HOME/bin/sonar-scanner \
+                         -Dsonar.java.binaries=. \
+                         -Dsonar.projectKey=$PROJECT_NAME \
+                         -Dsonar.sources=src/main/java'''
+                    }
+                    }
+          }
+
+           stage ('Input Release Version') {
+               steps{
+                    script {  
+                    slackSend channel: '#qc-devops-poc', 
+                              message: "${env.JOB_NAME}\n${commit_message}SonarScan" +"is completed, Please review and action\n"+"SonarQube\n"+"http://35.198.192.212:9000/dashboard?id=simple-app\n"+"Approval\n"+"http://34.87.156.214:8080/job/bam-simple-app/" 
+
+                    def INPUT_PARAM = input(
+                            message: "Should we continue?", ok: "Yes.",
+                            parameters: [
+                                    string(defaultValue: 'latest',
+                                            description: 'Please put your Release Version',
+                                            name: 'TAG_NAME')
+                            ])
+                    
+                    env.TAG_NAME = INPUT_PARAM           
+                    }
+               }
+          }
+
+          stage ('build push image') {
+               steps{
+                    script {
+                         sh "docker build -t ${registry_img}:${env.TAG_NAME}_${BUILD_NUMBER} ."
+                         sh "docker push ${registry_img}:${env.TAG_NAME}_${BUILD_NUMBER}" 
+                    }
+               }
+          }
+
+          stage ('Approve to Deploy') {
+               steps{
+                    script {  
+                    slackSend channel: '#qc-devops-poc', 
+                              message: "${env.JOB_NAME} Release ${env.TAG_NAME}\n" +"is requesting for approval\n"+"http://34.87.156.214:8080/job/bam-simple-app/"  
+                         
+                    def userInput = input(
+                         id: 'userInput', message: 'This is PRODUCTION!', submitterParameter: 'submitter', parameters: [
+                         [$class: 'BooleanParameterDefinition', defaultValue: false, description: '', name: 'Please confirm you sure to proceed']
+                    ])     
+
+               if(userInput=='false') {
+                    slackSend color: '#ff0000',
+                              channel: '#qc-devops-poc', 
+                              message: "${env.JOB_NAME} hasn't been approved"                      
+                    
+                    
+                              }   
+               else {
+                    slackSend color: '#0dff00',
+                              channel: '#qc-devops-poc', 
+                              message: "${env.JOB_NAME}\n" +"has been approved by ${userInput.submitter}"                         
+                         }                                   
+                    }
+               }
+          }
+
+          stage ('Deploy') {
+               steps{
+                    script {
+                         sh "kubectl -n example set image deployment/spring-app spring-app=${registry_img}:${env.TAG_NAME}_${BUILD_NUMBER}"
+                         sh "kubectl -n example rollout status -w deployment/spring-app --timeout=60s"
+                         sh "sleep 20"
+                    }
+               }
+          }
+
+
+          stage ('Run JMeter Test') {
+               steps{
+                    script {
+                         sh "/home/kamin_s/apache-jmeter-5.4.1/bin/jmeter.sh -Jjmeter.save.saveservice.output_format=xml -n -t /home/kamin_s/example-app.jmx -l example-app-report.jtl"
+                         perfReport 'example-app-report.jtl'
+                         env.snipreport = readFile "/var/lib/jenkins/jobs/bam-simple-app/builds/$BUILD_NUMBER/archive/standardResults.xml"
+                         
+                    }
+                    
+               }
+          }
+     
+     }
+     post{
+            success {
+                   slackSend color: '#0dff00',
+                             channel: '#qc-devops-poc', 
+                              message: "${env.JOB_NAME} Release ${env.TAG_NAME} has successfully deployed!\n Jmeter's Result\n${env.snipreport}for more detail http://34.87.156.214:8080/job/bam-simple-app/lastBuild/performance/ Access URL >> http://34.87.72.248/demo/all"
+                              jiraAddComment site: 'jira-cloud' ,comment: "${commit_message},Application ${env.TAG_NAME} has successfully deployed!\n Access URL >> http://34.87.72.248/demo/all ", idOrKey: "${issuejira}"
+                              
+            }
+            failure {
+                   slackSend color: '#ff0000',
+                             channel: '#qc-devops-poc',
+                             message: "${env.JOB_NAME} Release ${env.TAG_NAME} deploy has failed! " 
+                                 
+            }
+     }
+}
+
+
